@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from streamlit_gsheets import GSheetsConnection
-from datetime import datetime, timedelta, timedelta
+from datetime import datetime, timedelta
 import pytz
 import gspread
 import time
@@ -315,7 +315,7 @@ def main():
     tz = pytz.timezone("Asia/Ho_Chi_Minh")
     now = datetime.now(tz)
     today_str = now.strftime("%d/%m/%Y")
-    UU_TIEN_LIST = ["CM", "SF", "CF", "MM", "GO!", "EMART", "CTY", "SM", "NHAN VAN"]
+    UU_TIEN_LIST = ["CM", "SF", "CF", "MM", "GO!", "EMART", "CTY", "GENSHAI", "SM", "NHAN VAN"]
     GIO_CHAN = 1030
 
     st.title("🥤 Báo Cáo MT")
@@ -361,30 +361,11 @@ def main():
 
     df_f1 = df_master[df_master["NHAN VIEN"] == sel_nv]
     sel_ht = st.selectbox("🏪 Hệ thống", sorted(df_f1["HE THONG"].unique().tolist()))
+    sel_st = st.selectbox(
+        "🏬 Siêu thị",
+        sorted(df_f1[df_f1["HE THONG"] == sel_ht]["SIEU THI"].unique().tolist()),
+    )
     ht_up = sel_ht.upper()
-    
-    # Tính số lần viếng & hiển thị cho hệ thống phụ
-    st_list = sorted(df_f1[df_f1["HE THONG"] == sel_ht]["SIEU THI"].unique().tolist())
-    st_display_list = []
-    st_count_map = {}
-    
-    for st in st_list:
-        so_lan = df_history[
-            (df_history["NHAN VIEN"] == sel_nv) & (df_history["SIEU THI"] == st)
-            & (df_history["NGAY_DT"].dt.month == now.month)
-            & (df_history["NGAY_DT"].dt.year == now.year)
-        ].shape[0]
-        
-        if ht_up not in UU_TIEN_LIST:  # Hệ thống phụ
-            display = f"❌ {st} ({so_lan}/2 lần)" if so_lan >= 2 else f"✅ {st} ({so_lan}/2 lần)"
-            st_display_list.append(display)
-            st_count_map[display] = (st, so_lan)
-        else:  # Hệ thống ưu tiên
-            st_display_list.append(st)
-            st_count_map[st] = (st, so_lan)
-    
-    sel_st_display = st.selectbox("🏬 Siêu thị", st_display_list)
-    sel_st, so_lan_st = st_count_map[sel_st_display]
 
     df_visits = df_history[
         (df_history["NHAN VIEN"] == sel_nv)
@@ -436,7 +417,12 @@ def main():
     if now.day > 21 and ht_up not in UU_TIEN_LIST:
         block_reasons.append("🚫 Sau ngày 21, chỉ hệ thống ưu tiên được gửi.")
 
-    if ht_up not in UU_TIEN_LIST and so_lan_st >= 2:
+    so_lan = df_history[
+        (df_history["NHAN VIEN"] == sel_nv) & (df_history["SIEU THI"] == sel_st)
+        & (df_history["NGAY_DT"].dt.month == now.month)
+        & (df_history["NGAY_DT"].dt.year == now.year)
+    ].shape[0]
+    if ht_up not in UU_TIEN_LIST and so_lan >= 2:
         block_reasons.append(f"🚫 {sel_st} đã đủ 2 lần trong tháng.")
 
     # KIEM TRA CHAN 6 PHUT (HYBRID SMART CACHE)
