@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from streamlit_gsheets import GSheetsConnection
-from datetime import datetime, timedelta
+from datetime import datetime
 import pytz
 import gspread
 import time
@@ -361,33 +361,11 @@ def main():
 
     df_f1 = df_master[df_master["NHAN VIEN"] == sel_nv]
     sel_ht = st.selectbox("🏪 Hệ thống", sorted(df_f1["HE THONG"].unique().tolist()))
+    sel_st = st.selectbox(
+        "🏬 Siêu thị",
+        sorted(df_f1[df_f1["HE THONG"] == sel_ht]["SIEU THI"].unique().tolist()),
+    )
     ht_up = sel_ht.upper()
-    
-    # Tính số lần viếng & hiển thị với ⚫ nếu 2/2 (chỉ hệ thống phụ)
-    st_list = sorted(df_f1[df_f1["HE THONG"] == sel_ht]["SIEU THI"].unique().tolist())
-    st_display_list = []
-    st_count_map = {}
-    
-    for st in st_list:
-        so_lan = df_history[
-            (df_history["NHAN VIEN"] == sel_nv) & (df_history["SIEU THI"] == st)
-            & (df_history["NGAY_DT"].dt.month == now.month)
-            & (df_history["NGAY_DT"].dt.year == now.year)
-        ].shape[0]
-        
-        if ht_up not in UU_TIEN_LIST:  # Hệ thống phụ
-            if so_lan >= 2:
-                display = f"⚫ {st} (2/2)"  # Xám - đã đủ
-            else:
-                display = f"🟢 {st} ({so_lan}/2)"  # Xanh - chưa đủ
-            st_display_list.append(display)
-            st_count_map[display] = (st, so_lan)
-        else:  # Hệ thống ưu tiên - không mark
-            st_display_list.append(st)
-            st_count_map[st] = (st, so_lan)
-    
-    sel_st_display = st.selectbox("🏬 Siêu thị", st_display_list)
-    sel_st, so_lan_st = st_count_map[sel_st_display]
 
     df_visits = df_history[
         (df_history["NHAN VIEN"] == sel_nv)
