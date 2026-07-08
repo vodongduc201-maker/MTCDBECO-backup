@@ -493,7 +493,7 @@ def main():
             flat_row.extend([note, ""])
             st.session_state.pending_row     = flat_row
             st.session_state.form_inputs     = inputs
-            st.session_state.form_note       = note
+            # form_note đã được text_area(key="form_note") bind → KHÔNG gán lại
             st.session_state.confirm_pending = True
             st.rerun()
     else:
