@@ -1,10 +1,11 @@
 import streamlit as st
 import pandas as pd
 from streamlit_gsheets import GSheetsConnection
-from datetime import datetime, timedelta
+from datetime import datetime
 import pytz
 import gspread
 import time
+import html
 from google.oauth2.service_account import Credentials
 
 # --- 1. CẤU HÌNH ---
@@ -59,7 +60,6 @@ st.markdown("""
 .confirm-row:last-child { border-bottom: none; }
 .confirm-key   { color: #888; font-size: 0.78rem; }
 .confirm-value { font-weight: 600; text-align: right; }
-/* Cảnh báo hết hàng */
 .het-hang-box {
     background: #2d1a00; border-radius: 10px;
     padding: 14px 16px; border: 2px solid #ff8c00; margin: 8px 0 12px 0;
@@ -126,9 +126,13 @@ def color_class(val, warn, ok):
     elif val < ok:      return "color-yellow"
     else:               return "color-green"
 
+# FIX 3: helper escape HTML để chống XSS khi render tên SP / giá trị user
+def esc(text):
+    return html.escape(str(text)) if text is not None else ""
+
 def render_stat_cards(items):
     cards_html = "".join(
-        f'<div class="stat-card"><div class="stat-number {cls}">{value}</div><div class="stat-label">{label}</div></div>'
+        f'<div class="stat-card"><div class="stat-number {cls}">{esc(value)}</div><div class="stat-label">{esc(label)}</div></div>'
         for label, value, cls in items
     )
     st.markdown(f'<div class="stat-row">{cards_html}</div>', unsafe_allow_html=True)
@@ -140,12 +144,12 @@ def render_progress(done, total, label=""):
     st.markdown(f"""
     <div class="prog-wrap">
       <div class="prog-bar-bg"><div class="prog-bar-fill" style="width:{pct_int}%;background:{color};"></div></div>
-      <div class="prog-info"><span>{label}</span><span>{done}/{total} ({pct_int}%)</span></div>
+      <div class="prog-info"><span>{esc(label)}</span><span>{done}/{total} ({pct_int}%)</span></div>
     </div>""", unsafe_allow_html=True)
 
 def confirm_rows(pairs):
     rows = "".join(
-        f'<div class="confirm-row"><span class="confirm-key">{k}</span><span class="confirm-value">{v}</span></div>'
+        f'<div class="confirm-row"><span class="confirm-key">{esc(k)}</span><span class="confirm-value">{esc(v)}</span></div>'
         for k, v in pairs
     )
     st.markdown(f'<div class="confirm-box">{rows}</div>', unsafe_allow_html=True)
@@ -196,7 +200,7 @@ def main():
     now = datetime.now(tz)
     today_str = now.strftime("%d/%m/%Y")
     UU_TIEN_LIST = ["CM", "SF", "CF", "MM", "GO!", "EMART", "CTY", "GENSHAI", "SM", "NHAN VAN"]
-    GIO_CHAN = 1030  # 17*60+10
+    GIO_CHAN = 17 * 60 + 10  # 17:10
 
     st.title("🥤 Báo Cáo MT")
 
@@ -211,24 +215,27 @@ def main():
     if sel_nv == "Chọn nhân viên...":
         return
 
+    # Init session state
     for key, val in {
         "confirm_pending":    False,
         "pending_row":        None,
         "form_inputs":        {},
-        "form_note":          "",
+        "form_note":          "",          # FIX 7: chuẩn hoá key, bỏ form_note_input riêng
         "is_submitting":      False,
         "submitted_row_hash": None,
         "last_submit_time":   None,
         "last_submit_date":   None,
-        "het_hang_confirmed": None,   # None | True | False
+        "het_hang_confirmed": None,        # None | True | False
         "_last_sel_st":       None,
     }.items():
         if key not in st.session_state:
             st.session_state[key] = val
 
+    # Reset khi sang ngày mới
     if st.session_state.last_submit_date != today_str:
-        st.session_state.last_submit_time = None
-        st.session_state.last_submit_date = today_str
+        st.session_state.last_submit_time   = None
+        st.session_state.last_submit_date   = today_str
+        st.session_state.het_hang_confirmed = None
 
     conn = st.connection("gsheets", type=GSheetsConnection)
     try:
@@ -240,7 +247,18 @@ def main():
         st.warning(f"⚠️ Không thể đọc sheet: {e}. Bắt đầu với dữ liệu trắng.")
         df_history = pd.DataFrame(columns=["NGAY", "THU", "GIO", "NHAN VIEN", "HE THONG", "PHUONG", "SIEU THI"])
 
+    # FIX 2: strip whitespace ở values để filter == chính xác
+    for col in ["NHAN VIEN", "HE THONG", "PHUONG", "SIEU THI", "THU"]:
+        if col in df_history.columns:
+            df_history[col] = df_history[col].astype(str).str.strip()
+
+    # FIX 4: cast sang string + parse ngày linh hoạt (dd/mm/YYYY trước, fallback ISO)
+    df_history["NGAY"] = df_history["NGAY"].astype(str)
+    df_history["GIO"]  = df_history["GIO"].astype(str)
     df_history["NGAY_DT"] = pd.to_datetime(df_history["NGAY"], format="%d/%m/%Y", errors="coerce")
+    df_history["NGAY_DT"] = df_history["NGAY_DT"].fillna(
+        pd.to_datetime(df_history["NGAY"], errors="coerce")
+    )
 
     df_f1 = df_master[df_master["NHAN VIEN"] == sel_nv]
     sel_ht = st.selectbox("🏪 Hệ thống", sorted(df_f1["HE THONG"].unique().tolist()))
@@ -318,10 +336,12 @@ def main():
     san_pham_list = df_sp[df_sp["HE THONG"].str.upper() == ht_up]["SAN PHAM"].tolist()
     if not san_pham_list and ht_up != "CTY":
         st.warning("⚠️ Không tìm thấy sản phẩm cho hệ thống này.")
+        # FIX 10: vẫn show progress tháng
+        _render_month_progress(df_master, df_history, sel_nv, now, UU_TIEN_LIST)
         return
 
     # ═══════════════════════════════════════════════════════════
-    # BƯỚC XÁC NHẬN & GỬI
+    # CONFIRM SCREEN
     # ═══════════════════════════════════════════════════════════
     if st.session_state.confirm_pending:
         st.subheader("📋 Xác nhận trước khi gửi")
@@ -331,16 +351,56 @@ def main():
             ("Siêu thị",  sel_st),
             ("Thời gian", f"{today_str} {now.strftime('%H:%M')}"),
         ])
+
+        SP_CHUAN = ["Sa Xi Lon","Sa Xi Zero Lon","Xi Pet 390",
+                    "Xi Pet 1.5L","Soda Kem Lon","Suoi 500mL","Soda Lon"]
         sp_pairs = []
+        sp_ngoai_chuan = []
         for sp, vals in st.session_state.form_inputs.items():
             t = tong_ton(sp, vals["t"], vals["l"])
             sp_pairs.append((sp, f"F={vals['f']}  T={t}"))
+            if sp not in SP_CHUAN:
+                sp_ngoai_chuan.append(sp)
         if sp_pairs:
             confirm_rows(sp_pairs)
+        # FIX 8: cảnh báo SP ngoài schema lưu trữ
+        if sp_ngoai_chuan:
+            st.warning(f"⚠️ SP không có trong schema lưu trữ, sẽ bị bỏ qua: {', '.join(sp_ngoai_chuan)}")
         if st.session_state.form_note:
             st.caption(f"📝 Ghi chú: {st.session_state.form_note}")
-        if st.session_state.het_hang_confirmed:
+
+        # ── FLOW MỚI: hỏi "Hết hàng?" tại đây (sau khi user đã commit GỬI) ──
+        all_ton_zero = (
+            ht_up != "CTY"
+            and bool(st.session_state.form_inputs)
+            and all(
+                tong_ton(sp, v["t"], v["l"]) == 0
+                for sp, v in st.session_state.form_inputs.items()
+            )
+        )
+        if all_ton_zero and st.session_state.het_hang_confirmed is None:
+            st.markdown("""
+            <div class="het-hang-box">
+                <div class="het-hang-title">📦 Tất cả tồn kho = 0</div>
+                <div class="het-hang-sub">CH này đang tạm hết hàng?</div>
+            </div>
+            """, unsafe_allow_html=True)
+            c_yes, c_no = st.columns(2)
+            with c_yes:
+                if st.button("✅ Đúng, hết hàng", use_container_width=True, type="primary",
+                             key="hh_yes_confirm"):
+                    st.session_state.het_hang_confirmed = True
+                    st.rerun()
+            with c_no:
+                if st.button("❌ Sai, nhập lại", use_container_width=True, key="hh_no_confirm"):
+                    st.session_state.het_hang_confirmed = False
+                    st.session_state.confirm_pending     = False
+                    st.rerun()
+            st.button("🔒 Cần xác nhận trước khi gửi", disabled=True, use_container_width=True)
+            return
+        if st.session_state.het_hang_confirmed is True:
             st.warning("⚠️ Đã xác nhận: CH này đang tạm hết hàng.")
+
         st.write("")
         row_hash = hash(tuple(st.session_state.pending_row))
         btn_label = "⏳ Đang gửi..." if st.session_state.is_submitting else "✅ Xác nhận & Gửi"
@@ -349,6 +409,7 @@ def main():
             if not st.session_state.is_submitting:
                 st.session_state.is_submitting = True
                 st.rerun()
+
         if st.session_state.is_submitting:
             if st.session_state.last_submit_time is None:
                 st.session_state.last_submit_time = now
@@ -366,14 +427,21 @@ def main():
                     st.session_state.is_submitting      = False
                     st.session_state.het_hang_confirmed = None
                     for key in list(st.session_state.keys()):
-                        if key.startswith("f_") or key.startswith("t_") or key.startswith("l_"):
+                        if (key.startswith("f_") or key.startswith("t_")
+                                or key.startswith("l_") or key == "form_note"):
                             del st.session_state[key]
+                    # FIX 6: clear cache để lần đọc tiếp theo thấy data mới
+                    st.cache_data.clear()
                     st.rerun()
                 else:
-                    st.session_state.is_submitting = False
+                    # FIX 1: fail write → clear last_submit_time để user retry
+                    st.session_state.is_submitting    = False
+                    st.session_state.last_submit_time = None
+
         if not st.session_state.is_submitting:
-            if st.button("↩️ Quay lại sửa", use_container_width=True):
-                st.session_state.confirm_pending = False
+            if st.button("↩️ Quay lại sửa", use_container_width=True, key="back_to_form"):
+                st.session_state.confirm_pending    = False
+                st.session_state.het_hang_confirmed = None
                 st.rerun()
         return
 
@@ -388,9 +456,10 @@ def main():
             l_val = st.session_state.get(f"l_{sp}", 0)
             tong_preview = tong_ton(sp, t_val, l_val)
             has_data = f_val > 0 or tong_preview > 0
+            # FIX 3: escape tên SP khi render HTML
             st.markdown(f"""
             <div class="product-card">
-                <div class="product-name">{'✅' if has_data else '➕'} {sp}</div>
+                <div class="product-name">{'✅' if has_data else '➕'} {esc(sp)}</div>
             </div>
             """, unsafe_allow_html=True)
             c1, c2, c3 = st.columns([1, 1, 1])
@@ -399,48 +468,8 @@ def main():
             with c3: l = st.number_input("Lẻ",     min_value=0, step=1, key=f"l_{sp}")
             inputs[sp] = {"f": f, "t": t, "l": l}
 
-    note = st.text_area("📝 Ghi chú", height=80, key="form_note_input")
-
-    # ── KIỂM TRA TỒN = 0 TOÀN BỘ ─────────────────────────────
-    all_ton_zero = (
-        ht_up != "CTY"
-        and bool(inputs)
-        and all(tong_ton(sp, v["t"], v["l"]) == 0 for sp, v in inputs.items())
-    )
-
-    if all_ton_zero:
-        st.markdown("""
-        <div class="het-hang-box">
-            <div class="het-hang-title">📦 Tất cả tồn kho = 0</div>
-            <div class="het-hang-sub">CH này đang tạm hết hàng?</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        c_yes, c_no = st.columns(2)
-        with c_yes:
-            if st.button("✅ Đúng, hết hàng", use_container_width=True, type="primary"):
-                st.session_state.het_hang_confirmed = True
-                st.rerun()
-        with c_no:
-            if st.button("❌ Sai, nhập lại", use_container_width=True):
-                st.session_state.het_hang_confirmed = False
-                st.rerun()
-
-        # Chưa chọn → chặn
-        if st.session_state.het_hang_confirmed is None:
-            st.caption("⬆️ Vui lòng xác nhận trước khi tiếp tục.")
-            st.button("🔒 Cần xác nhận hết hàng", disabled=True, use_container_width=True)
-            _render_month_progress(df_master, df_history, sel_nv, now, UU_TIEN_LIST)
-            return
-
-        # Chọn SAI → yêu cầu nhập lại
-        if st.session_state.het_hang_confirmed == False:
-            st.error("🔄 Vui lòng kiểm tra và nhập lại số tồn kho bên trên.")
-            st.button("🔒 Không thể gửi", disabled=True, use_container_width=True)
-            _render_month_progress(df_master, df_history, sel_nv, now, UU_TIEN_LIST)
-            return
-
-        # Chọn ĐÚNG → rơi xuống nút GỬI bình thường
+    # FIX 7: dùng trực tiếp key="form_note" (Streamlit tự ghi vào session_state)
+    note = st.text_area("📝 Ghi chú", height=80, key="form_note")
 
     # ── NÚT GỬI ────────────────────────────────────────────────
     if not is_blocked:
@@ -456,10 +485,11 @@ def main():
                 SP_CHUAN = ["Sa Xi Lon","Sa Xi Zero Lon","Xi Pet 390",
                             "Xi Pet 1.5L","Soda Kem Lon","Suoi 500mL","Soda Lon"]
                 for sp in SP_CHUAN:
+                    # FIX 5: dùng "" thay vì None cho missing → schema thống nhất
                     if sp in inputs:
                         flat_row.extend([inputs[sp]["f"], tong_ton(sp, inputs[sp]["t"], inputs[sp]["l"])])
                     else:
-                        flat_row.extend([None, None])
+                        flat_row.extend(["", ""])
             flat_row.extend([note, ""])
             st.session_state.pending_row     = flat_row
             st.session_state.form_inputs     = inputs
